@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <!-- <link rel="stylesheet" type="text/css" href="css/base.css" /> -->
+    <link rel="stylesheet" type="text/css" href="css/demo1.css" />
+
+    <script src='https://cdnjs.cloudflare.com/ajax/libs/three.js/88/three.min.js'></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/1.19.1/TweenMax.min.js"></script>
+    <script src='js/events.js'></script>
+    <script src='js/TouchTexture.js'></script>
+    <script src='js/InteractiveControls.js'></script>
+    <script src='js/browser-detect.js'></script>
+</head>
+
+<body>
+    <script>
+        var numFilesLeft = 2;
+        var sample_png = "images/sample-07.png";
+        var texture_width;
+        var texture_height;
+        var fShader;
+        var vShader;
+        var object3D;
+        var parTexture;
+        var hitArea;
+        var touch;
+        var fovHeight;
+        var handlerAnimate;
+        var intersectionData;
+        var handlerInteractiveMove;
+        var interactive;
+
+
+        var scene = new THREE.Scene();
+
+        // camera
+        var camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 10000);
+        camera.position.z = 300;
+
+        // renderer
+        var renderer = new THREE.WebGLRenderer({
+            antialias: true,
+            alpha: true
+        });
+
+        var raycaster = new THREE.Raycaster();
+        var mouse = new THREE.Vector2();
+        var plane = new THREE.Plane();
+
+        // clock
+        var clock = new THREE.Clock(true);
+
+        var container = new THREE.Object3D();
+
+        document.body.appendChild(renderer.domElement);
+
+        particles_init(sample_png);
+
+        initControls();
+        particle_animate();
+
+
+        function particles_init(sample_png) {
+            const textureloader = new THREE.TextureLoader();
+            var loader = new THREE.FileLoader();
+
+            textureloader.load(sample_png, (texture) => {
+                parTexture = texture;
+                parTexture.minFilter = THREE.LinearFilter;
+                parTexture.magFilter = THREE.LinearFilter;
+                parTexture.format = THREE.RGBFormat;
+
+                texture_width = parTexture.image.width;
+                texture_height = parTexture.image.height;
+
+                loader.load('shaders/particle.frag', function(data) {
+                    fShader = data;
+                    runMoreIfDone()
+                });
+                loader.load('shaders/particle.vert', function(data) {
+                    vShader = data;
+                    runMoreIfDone()
+                });
+
+                webglview_resize();
+            });
+        }
+
+
+        function runMoreIfDone() {
+            numFilesLeft--;
+            if (numFilesLeft === 0) {
+                more();
+                initHitArea();
+                particles_initTouch();
+                particles_resize();
+                particles_show();
+            }
+        }
+
+        function more() {
+            var numPoints = texture_width * texture_height;
+
+            let numVisible = numPoints;
+            let threshold = 0;
+            let originalColors;
+
+            // discard pixels darker than threshold #22
+            numVisible = 0;
+            threshold = 34;
+
+            const img = parTexture.image;
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            canvas.width = texture_width;
+            canvas.height = texture_height;
+            ctx.scale(1, -1);
+            ctx.drawImage(img, 0, 0, texture_width, texture_height * -1);
+
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            originalColors = Float32Array.from(imgData.data);
+
+            for (let i = 0; i < numPoints; i++) {
+                if (originalColors[i * 4 + 0] > threshold) numVisible++;
+            }
+
+            const uniforms = {
+                uTime: {
+                    value: 0
+                },
+                uRandom: {
+                    value: 1.0
+                },
+                uDepth: {
+                    value: 2.0
+                },
+                uSize: {
+                    value: 0.0
+                },
+                uTextureSize: {
+                    value: new THREE.Vector2(texture_width, texture_height)
+                },
+                uTexture: {
+                    value: parTexture
+                },
+                uTouch: {
+                    value: null
+                },
+            };
+
+            const material = new THREE.RawShaderMaterial({
+                uniforms,
+                vertexShader: vShader,
+                fragmentShader: fShader,
+                depthTest: false,
+                transparent: true,
+                // blending: THREE.AdditiveBlending
+            });
+
+            const geometry = new THREE.InstancedBufferGeometry();
+
+            // positions
+            const positions = new THREE.BufferAttribute(new Float32Array(4 * 3), 3);
+            positions.setXYZ(0, -0.5, 0.5, 0.0);
+            positions.setXYZ(1, 0.5, 0.5, 0.0);
+            positions.setXYZ(2, -0.5, -0.5, 0.0);
+            positions.setXYZ(3, 0.5, -0.5, 0.0);
+            geometry.addAttribute('position', positions);
+
+            // uvs
+            const uvs = new THREE.BufferAttribute(new Float32Array(4 * 2), 2);
+            uvs.setXYZ(0, 0.0, 0.0);
+            uvs.setXYZ(1, 1.0, 0.0);
+            uvs.setXYZ(2, 0.0, 1.0);
+            uvs.setXYZ(3, 1.0, 1.0);
+            geometry.addAttribute('uv', uvs);
+
+            // index
+            geometry.setIndex(new THREE.BufferAttribute(new Uint16Array([0, 2, 1, 2, 3, 1]), 1));
+
+            //console.log(geometry);
+
+            const indices = new Uint16Array(numVisible);
+            const offsets = new Float32Array(numVisible * 3);
+            const angles = new Float32Array(numVisible);
+
+            for (let i = 0, j = 0; i < numPoints; i++) {
+                if (originalColors[i * 4 + 0] <= threshold) continue;
+
+                offsets[j * 3 + 0] = i % texture_width;
+                offsets[j * 3 + 1] = Math.floor(i / texture_width);
+
+                indices[j] = i;
+                angles[j] = Math.random() * Math.PI;
+                j++;
+            }
+
+            geometry.addAttribute('pindex', new THREE.InstancedBufferAttribute(indices, 1, false));
+            geometry.addAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3, false));
+            geometry.addAttribute('angle', new THREE.InstancedBufferAttribute(angles, 1, false));
+
+            object3D = new THREE.Mesh(geometry, material);
+            container = new THREE.Object3D();
+            container.position.set(-22, 10, 5);
+            container.add(object3D);
+            scene.add(container);
+        }
+
+        function addListeners() {
+            handlerInteractiveMove = particles_onInteractiveMove.bind(this);
+
+            interactive.addListener('interactive-move', handlerInteractiveMove);
+            if (hitArea != undefined) interactive.objects.push(hitArea);
+        }
+
+        function initHitArea() {
+            const geometry = new THREE.PlaneGeometry(texture_width, texture_height, 1, 1);
+            const material = new THREE.MeshBasicMaterial({
+                color: 0xFFFFFF,
+                wireframe: true,
+                depthTest: false
+            });
+            material.visible = false;
+            hitArea = new THREE.Mesh(geometry, material);
+            container.add(hitArea);
+        }
+
+        function initControls() {
+            interactive = new InteractiveControls(camera, renderer.domElement);
+        }
+
+        function particle_animate() {
+            webglview_update();
+            webglview_draw();
+
+            this.raf = requestAnimationFrame(particle_animate);
+        }
+
+        function webglview_update() {
+            const delta = clock.getDelta();
+            particles_update(delta);
+        }
+
+        function webglview_draw() {
+            renderer.render(scene, camera);
+        }
+
+        function webglview_resize() {
+            if (!renderer) return;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+
+            fovHeight = 2 * Math.tan((camera.fov * Math.PI) / 180 / 2) * camera.position.z;
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            interactive.resize();
+            particles_resize();
+        }
+
+
+        function particles_initTouch() {
+            // create only once
+            if (!touch) touch = new TouchTexture(this);
+            object3D.material.uniforms.uTouch.value = touch.texture;
+        }
+
+        function particles_update(delta) {
+            if (!object3D) return;
+            if (touch) touch.update();
+            object3D.material.uniforms.uTime.value += delta;
+        }
+
+        function particles_show(time = 1.0) {
+            // reset
+            TweenLite.fromTo(object3D.material.uniforms.uSize, time, {
+                value: 0.5
+            }, {
+                value: 1.5
+            });
+            TweenLite.to(object3D.material.uniforms.uRandom, time, {
+                value: 2.0
+            });
+            TweenLite.fromTo(object3D.material.uniforms.uDepth, time * 1.5, {
+                value: 40.0
+            }, {
+                value: 4.0
+            });
+
+            addListeners();
+        }
+
+        function particles_resize() {
+            if (!object3D) return;
+
+            var scale = fovHeight / texture_height;
+            scale = scale / 2;
+            // const scaleX = sample_png_w / texture_width;
+            // const scaleY = sample_png_h / texture_height;
+            object3D.scale.set(scale, scale, 1);
+            hitArea.scale.set(scale, scale, 1);
+        }
+
+        function particles_onInteractiveMove(e) {
+            const uv = e.intersectionData.uv;
+            if (touch) touch.addTouch(uv);
+        }
+    </script>
+</body>
+
+</html>
